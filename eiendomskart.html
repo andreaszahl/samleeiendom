@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eiendommer Sømna</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1f2328; --muted: #6b7178;
+    --line: #e3e1dc; --accent: #2f6f5e; --err: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: var(--bg); display: flex; }
+  aside { width: 320px; flex: none; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  header { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .add { padding: 12px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+  .add label { font-size: 12px; color: var(--muted); }
+  .add textarea { width: 100%; resize: vertical; min-height: 54px; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+  .row { display: flex; gap: 6px; }
+  button { font: inherit; padding: 6px 10px; border: 1px solid var(--line); background: #fff; border-radius: 6px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:hover { filter: brightness(0.96); }
+  .tools { padding: 8px 16px; display: flex; gap: 6px; border-bottom: 1px solid var(--line); }
+  .tools button { font-size: 12px; padding: 4px 8px; }
+  ul { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; flex: 1; }
+  li { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid #f0eee9; }
+  li:hover { background: #faf9f6; }
+  li input[type=color] { width: 22px; height: 22px; padding: 0; border: none; background: none; cursor: pointer; }
+  .name { cursor: pointer; min-width: 0; }
+  .name b { font-weight: 600; }
+  .name .meta { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .name .meta.err { color: var(--err); }
+  .del { border: none; background: none; color: var(--muted); font-size: 16px; padding: 2px 4px; }
+  .empty { padding: 16px; color: var(--muted); }
+  footer { border-top: 1px solid var(--line); padding: 10px 16px; background: #faf9f6; font-variant-numeric: tabular-nums; }
+  footer .tot { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  footer .tot b { font-size: 16px; }
+  footer .meta { font-size: 12px; color: var(--muted); }
+  #map { flex: 1; height: 100%; }
+  .leaflet-tooltip.lbl { background: rgba(255,255,255,.85); border: none; box-shadow: none; font-weight: 600; padding: 1px 4px; }
+  @media (max-width: 700px) {
+    body { flex-direction: column; }
+    aside { width: 100%; height: 45%; border-right: none; border-bottom: 1px solid var(--line); }
+    #map { height: 55%; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>Eiendommer – Sømna</h1>
+    <div class="sub">Kommune 1812 · grenser fra Kartverket (Matrikkelen)</div>
+  </header>
+  <div class="add">
+    <label for="inp">Legg til gnr/bnr – én per linje, valgfritt navn etter mellomrom<br>
+      f.eks. <code>12/3</code>, <code>12/3 Naustet</code>, <code>12/3/1</code> (feste)</label>
+    <textarea id="inp" placeholder="12/3&#10;12/7 Hytta"></textarea>
+    <div class="row"><button class="primary" id="addBtn">Legg til</button></div>
+  </div>
+  <div class="tools">
+    <button id="allOn">Vis alle</button>
+    <button id="allOff">Skjul alle</button>
+    <button id="fit">Zoom til valgte</button>
+  </div>
+  <ul id="list"></ul>
+  <footer id="sum"></footer>
+</aside>
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ---- Konfig ----------------------------------------------------------------
+const KOMMUNE = "1812"; // Sømna
+// Faste eiendommer som alltid ligger i lista (kan stå tom). Eksempel:
+// { gnr: 12, bnr: 3, navn: "Naustet", farge: "#e4572e" }
+const STANDARD_EIENDOMMER = [];
+const API = "https://ws.geonorge.no/eiendom/v1/geokoding";
+const PALETT = ["#e4572e", "#2f6f5e", "#3b6fd6", "#c79a1e", "#8e44ad", "#d6336c", "#0f8b8d", "#6d4c41"];
+const STORE_KEY = "somna-eiendommer-v1";
+
+// ---- Kart -----------------------------------------------------------------
+const map = L.map("map").setView([65.32, 12.2], 11);
+L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png", {
+  maxZoom: 18,
+  attribution: '&copy; <a href="https://www.kartverket.no/">Kartverket</a>'
+}).addTo(map);
+
+// ---- Tilstand -------------------------------------------------------------
+let items = load();
+const layers = {};   // id -> L.GeoJSON
+const cache = {};    // id -> geojson
+const status = {};   // id -> tekst
+const areas = {};    // id -> { sum, teiger }
+
+function id(e) { return [e.gnr, e.bnr, e.fnr || 0, e.snr || 0].join("/"); }
+function label(e) { return `${e.gnr}/${e.bnr}${e.fnr ? "/" + e.fnr : ""}${e.snr ? "/" + e.snr : ""}`; }
+
+function load() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) {}
+  const list = Array.isArray(saved) ? saved : [];
+  STANDARD_EIENDOMMER.forEach((e, i) => {
+    if (!list.some(x => id(x) === id(e))) list.push({ farge: PALETT[i % PALETT.length], on: false, ...e });
+  });
+  return list;
+}
+function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(items)); } catch (_) {} }
+
+// ---- Datahenting ----------------------------------------------------------
+async function fetchEiendom(e) {
+  const k = id(e);
+  if (cache[k]) return cache[k];
+  const p = new URLSearchParams({
+    kommunenummer: KOMMUNE, gardsnummer: e.gnr, bruksnummer: e.bnr,
+    omrade: "true", utkoordsys: "4326", treffPerSide: "100"
+  });
+  if (e.fnr) p.set("festenummer", e.fnr);
+  if (e.snr) p.set("seksjonsnummer", e.snr);
+  const r = await fetch(`${API}?${p}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const gj = await r.json();
+  // Behold bare treff som faktisk er denne eiendommen (API-et kan gi flere)
+  gj.features = (gj.features || []).filter(f => {
+    const pr = f.properties || {};
+    const g = pr.gardsnummer ?? pr.gnr, b = pr.bruksnummer ?? pr.bnr;
+    return g == null || (g == e.gnr && b == e.bnr);
+  });
+  cache[k] = gj;
+  return gj;
+}
+
+// Areal (m²) for lon/lat-polygon, sfærisk tilnærming
+function ringArea(ring) {
+  const R = 6378137, rad = Math.PI / 180;
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i], [x2, y2] = ring[i + 1];
+    a += (x2 - x1) * rad * (2 + Math.sin(y1 * rad) + Math.sin(y2 * rad));
+  }
+  return Math.abs(a * R * R / 2);
+}
+function polyArea(rings) { return rings.reduce((s, r, i) => s + (i === 0 ? ringArea(r) : -ringArea(r)), 0); }
+function areaOf(gj) {
+  let sum = 0, teiger = 0;
+  gj.features.forEach(f => {
+    const g = f.geometry; if (!g) return;
+    if (g.type === "Polygon") { sum += polyArea(g.coordinates); teiger++; }
+    if (g.type === "MultiPolygon") g.coordinates.forEach(p => { sum += polyArea(p); teiger++; });
+  });
+  return { sum, teiger };
+}
+function fmtArea(m2) {
+  return m2 >= 10000 ? `${(m2 / 1000).toLocaleString("no", { maximumFractionDigits: 1 })} daa`
+                     : `${Math.round(m2).toLocaleString("no")} m²`;
+}
+
+// ---- Visning --------------------------------------------------------------
+async function show(e) {
+  const k = id(e);
+  if (layers[k]) { layers[k].addTo(map); renderSum(); return; }
+  status[k] = "Henter …"; render();
+  try {
+    const gj = await fetchEiendom(e);
+    if (!gj.features.length) { status[k] = "!Fant ikke eiendommen"; render(); return; }
+    const { sum, teiger } = areaOf(gj);
+    areas[k] = { sum, teiger };
+    status[k] = teiger ? `${teiger} teig${teiger > 1 ? "er" : ""} · ${fmtArea(sum)}` : "Kun punkt (ingen flate)";
+    const lyr = L.geoJSON(gj, {
+      style: () => styleFor(e),
+      pointToLayer: (_, ll) => L.circleMarker(ll, { radius: 6, ...styleFor(e) })
+    }).bindTooltip(e.navn ? `${label(e)} ${e.navn}` : label(e), { sticky: true, className: "lbl" });
+    layers[k] = lyr;
+    if (e.on) lyr.addTo(map);
+  } catch (err) {
+    status[k] = "!Feil ved henting: " + err.message;
+  }
+  render();
+}
+function hide(e) { const l = layers[id(e)]; if (l) map.removeLayer(l); renderSum(); }
+function styleFor(e) { return { color: e.farge, weight: 2, fillColor: e.farge, fillOpacity: 0.3 }; }
+
+function zoomTo(list) {
+  const b = L.latLngBounds([]);
+  list.forEach(e => { const l = layers[id(e)]; if (l && map.hasLayer(l)) b.extend(l.getBounds()); });
+  if (b.isValid()) map.fitBounds(b, { padding: [30, 30], maxZoom: 17 });
+}
+
+function renderSum() {
+  const valgt = items.filter(e => e.on);
+  const medAreal = valgt.filter(e => areas[id(e)]);
+  const sum = medAreal.reduce((s, e) => s + areas[id(e)].sum, 0);
+  const teiger = medAreal.reduce((s, e) => s + areas[id(e)].teiger, 0);
+  const venter = valgt.length - medAreal.length;
+  document.getElementById("sum").innerHTML = `
+    <div class="tot"><span>Sum viste eiendommer</span><b>${fmtArea(sum)}</b></div>
+    <div class="meta">${valgt.length} eiendom${valgt.length === 1 ? "" : "mer"} · ${teiger} teig${teiger === 1 ? "" : "er"}
+      · ${Math.round(sum).toLocaleString("no")} m²${venter ? ` · ${venter} uten areal` : ""}</div>`;
+}
+
+function render() {
+  renderSum();
+  const ul = document.getElementById("list");
+  ul.innerHTML = "";
+  if (!items.length) { ul.innerHTML = '<li class="empty" style="display:block">Ingen eiendommer ennå. Legg til over.</li>'; return; }
+  items.slice().sort((a, b) => a.gnr - b.gnr || a.bnr - b.bnr || (a.fnr||0) - (b.fnr||0)).forEach(e => {
+    const k = id(e), st = status[k] || "";
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <input type="checkbox" ${e.on ? "checked" : ""} title="Vis i kart">
+      <input type="color" value="${e.farge}" title="Farge">
+      <span class="name"><b>${label(e)}</b> ${e.navn ? escapeHtml(e.navn) : ""}
+        <span class="meta ${st.startsWith("!") ? "err" : ""}">${escapeHtml(st.replace(/^!/, ""))}</span></span>
+      <button class="del" title="Fjern">×</button>`;
+    const [cb, col] = li.querySelectorAll("input");
+    cb.onchange = async () => { e.on = cb.checked; save(); if (e.on) { await show(e); zoomTo([e]); } else hide(e); };
+    col.oninput = () => { e.farge = col.value; save(); layers[k]?.setStyle(styleFor(e)); };
+    li.querySelector(".name").onclick = async () => {
+      if (!e.on) { e.on = true; save(); await show(e); }
+      zoomTo([e]);
+    };
+    li.querySelector(".del").onclick = () => {
+      hide(e); delete layers[k]; items = items.filter(x => id(x) !== k); save(); render();
+    };
+    ul.appendChild(li);
+  });
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---- Input ----------------------------------------------------------------
+function parseLine(line) {
+  const m = line.trim().match(/^(\d+)\s*\/\s*(\d+)(?:\s*\/\s*(\d+))?(?:\s*\/\s*(\d+))?\s*(.*)$/);
+  if (!m) return null;
+  return { gnr: +m[1], bnr: +m[2], fnr: m[3] ? +m[3] : 0, snr: m[4] ? +m[4] : 0, navn: m[5].trim() };
+}
+document.getElementById("addBtn").onclick = () => {
+  const ta = document.getElementById("inp");
+  const bad = [];
+  ta.value.split(/\n|,|;/).filter(s => s.trim()).forEach(line => {
+    const e = parseLine(line);
+    if (!e) { bad.push(line.trim()); return; }
+    const existing = items.find(x => id(x) === id(e));
+    if (existing) { if (e.navn) existing.navn = e.navn; return; }
+    items.push({ ...e, farge: PALETT[items.length % PALETT.length], on: true });
+  });
+  ta.value = bad.join("\n");
+  save(); render();
+  Promise.all(items.filter(e => e.on).map(show)).then(() => zoomTo(items.filter(e => e.on)));
+};
+document.getElementById("allOn").onclick = async () => {
+  items.forEach(e => e.on = true); save(); render();
+  await Promise.all(items.map(show)); zoomTo(items);
+};
+document.getElementById("allOff").onclick = () => { items.forEach(e => { e.on = false; hide(e); }); save(); render(); };
+document.getElementById("fit").onclick = () => zoomTo(items.filter(e => e.on));
+
+// ---- Start ----------------------------------------------------------------
+render();
+const startOn = items.filter(e => e.on);
+Promise.all(startOn.map(show)).then(() => zoomTo(startOn));
+</script>
+</body>
+</html>
